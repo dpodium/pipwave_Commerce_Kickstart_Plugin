@@ -1,0 +1,52 @@
+<?php
+
+/**
+ * @file
+ * Requirements check and defining database table schema.
+ */
+
+/**
+ * Implementation of hook_requirements().
+ *
+ * Check if cURL library is installed.
+ */
+function commerce_pipwave_requirements($phase) {
+    // Skip the requirements check if SimpleTest is installed to avoid multiple cURL rows.
+    if (module_exists('simpletest')) {
+        return;
+    }
+
+    $t = get_t();
+
+    $has_curl = function_exists('curl_init');
+
+    $requirements['commerce_pipwave_curl'] = array(
+        'title' => $t('cURL'),
+        'value' => $has_curl ? $t('Enabled') : $t('Not found'),
+    );
+
+    if (!$has_curl) {
+        $requirements['commerce_pipwave_curl'] += array(
+            'severity' => REQUIREMENT_ERROR,
+            'description' => $t("pipwave requires the PHP <a href='!curl_url'>cURL</a> library.", array('!curl_url' => 'http://php.net/manual/en/curl.setup.php')),
+        );
+    }
+
+    return $requirements;
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function commerce_pipwave_uninstall() {
+    // Perform some clean on uninstall.
+    drupal_session_start();
+    if (isset($_SESSION['commerce_pipwave'])) {
+        unset($_SESSION['commerce_pipwave']);
+    }
+
+    variable_del('commerce_pipwave_api_key');
+    variable_del('commerce_pipwave_api_secret');
+    variable_del('commerce_pipwave_test_mode');
+    variable_del('commerce_pipwave_surcharge_group');
+}
