@@ -75,7 +75,7 @@ function commerce_pipwave_admin_form($form, &$form_state) {
     );
     $form["merchant"]["mode"] = array(
         '#type' => 'checkbox',
-        '#title' => 'Turn on test mode',
+        '#title' => 'Enable test mode',
         '#default_value' => variable_get('commerce_pipwave_test_mode'),
     );
     $form["merchant"]["processing_fee_group"] = array(
@@ -176,10 +176,10 @@ function commerce_pipwave_order_form($form, &$form_state, $order, $settings) {
         'action' => 'initiate-payment',
         'timestamp' => time(),
         'api_key' => variable_get('commerce_pipwave_api_key'),
-        'txn_id' => $order->order_id . "",
+        'txn_id' => $order->order_number . "",
         'amount' => $amount,
         'currency_code' => $currency_code,
-        'short_description' => 'Payment for Order#' . $order->order_id,
+        'short_description' => 'Payment for Order#' . $order->order_number,
         'session_info' => array(
             'ip_address' => $order->revision_hostname,
             'language' => isset($language->language) ? $language->language : ''
@@ -196,6 +196,8 @@ function commerce_pipwave_order_form($form, &$form_state, $order, $settings) {
         )
     );
     module_load_include('inc', 'addressfield', 'addressfield.administrative_areas');
+    module_load_include('inc', 'locale', 'locale');
+    $countries = country_get_list();
     if (isset($order->commerce_customer_billing[LANGUAGE_NONE][0])) {
         $billing_address = entity_metadata_wrapper('commerce_order', $order)->commerce_customer_billing->commerce_customer_address->value();
         $administrative_areas = addressfield_get_administrative_areas($billing_address['country']);
@@ -206,7 +208,8 @@ function commerce_pipwave_order_form($form, &$form_state, $order, $settings) {
             'city' => $billing_address['locality'],
             'state' => isset($administrative_areas[$billing_address['administrative_area']]) ? $administrative_areas[$billing_address['administrative_area']] : '',
             'zip' => $billing_address['postal_code'],
-            'country' => $billing_address['country'],
+            'country' => isset($countries[$billing_address['country']]) ? $countries[$billing_address['country']] : '',
+            'country_iso2' => $billing_address['country']
         );
         $data['buyer_info']['first_name'] = $billing_address['first_name'];
         $data['buyer_info']['last_name'] = $billing_address['last_name'];
@@ -223,7 +226,8 @@ function commerce_pipwave_order_form($form, &$form_state, $order, $settings) {
             'city' => $shipping_address['locality'],
             'state' => isset($administrative_areas[$shipping_address['administrative_area']]) ? $administrative_areas[$shipping_address['administrative_area']] : '',
             'zip' => $shipping_address['postal_code'],
-            'country' => $shipping_address['country'],
+            'country' => isset($countries[$shipping_address['country']]) ? $countries[$shipping_address['country']] : '',
+            'country_iso2' => $shipping_address['country']
         );
     }
     //get product details
@@ -304,33 +308,52 @@ function commerce_pipwave_redirect_form_validate($response, $order, $payment_met
     $transaction->remote_id = $response["pw_id"];
     $transaction->status_code = $response["transaction_status"];
     $with_warning_msg = ($response['status'] == 3001) ? " (with warning)" : '';
-
-    if ($response["status"] == 200 || $response["status"] == 3001) {
-        if ($response["transaction_status"] == 10) { // complete
-            $transaction->status = COMMERCE_PAYMENT_STATUS_SUCCESS;
-            $transaction->message = t("Payment Status: Complete{$with_warning_msg}");
-            $transaction->remote_status = 'Paid';
-            commerce_order_status_update($order, 'pending');
-        } else if ($response["transaction_status"] == 1) { // fail
-            $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
-            $transaction->message = t("Payment Status: Failed{$with_warning_msg}");
-            $transaction->remote_status = 'Failed';
-            commerce_order_status_update($order, 'canceled');
-        } else if ($response["transaction_status"] == 2) { // cancel
-            $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
-            $transaction->message = t("Payment Status: Canceled{$with_warning_msg}");
-            $transaction->remote_status = 'Canceled';
-            commerce_order_status_update($order, 'canceled');
-        } else if ($response["transaction_status"] == 5) {
-            commerce_checkout_complete($order);
-            $transaction->status = COMMERCE_PAYMENT_STATUS_PENDING;
-            $transaction->message = t("Payment Status: Pending{$with_warning_msg}");
-            $transaction->remote_status = 'Payment In Progress';
-        } else if ($response["transaction_status"] == 20) { // refund
-            $transaction->status = COMMERCE_PAYMENT_STATUS_SUCCESS;
-            $transaction->message = t("Payment Status: Refunded{$with_warning_msg}; pipwave Transaction ID: " . $response["pw_id"]);
-            $transaction->remote_status = 'Refunded';
-        }
+    
+    $signature_param = array(
+        'timestamp' => $response['timestamp'],
+        'api_key' => variable_get("commerce_pipwave_api_key"),
+        'pw_id' => $response['pw_id'],
+        'txn_id' => $response['txn_id'],
+        'amount' => $response['amount'],
+        'currency_code' => $response['currency_code'],
+        'transaction_status' => $response['transaction_status'],
+        'api_secret' => variable_get('commerce_pipwave_api_secret'),
+    );
+    $signature = commerce_pipwave_generate_signature($signature_param);
+    if ($response['signature'] == $signature) {
+        if ($response["status"] == 200 || $response["status"] == 3001) {
+            if ($response["transaction_status"] == 10) { // complete
+                $transaction->status = COMMERCE_PAYMENT_STATUS_SUCCESS;
+                $transaction->message = t("Payment Status: Complete{$with_warning_msg}");
+                $transaction->remote_status = 'Paid';
+                commerce_order_status_update($order, 'processing');
+            } else if ($response["transaction_status"] == 1) { // fail
+                $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
+                $transaction->message = t("Payment Status: Failed{$with_warning_msg}");
+                $transaction->remote_status = 'Failed';
+                commerce_order_status_update($order, 'canceled');
+            } else if ($response["transaction_status"] == 2) { // cancel
+                $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
+                $transaction->message = t("Payment Status: Canceled{$with_warning_msg}");
+                $transaction->remote_status = 'Canceled';
+                commerce_order_status_update($order, 'canceled');
+            } else if ($response["transaction_status"] == 5) {
+                commerce_checkout_complete($order);
+                $transaction->status = COMMERCE_PAYMENT_STATUS_PENDING;
+                $transaction->message = t("Payment Status: Pending{$with_warning_msg}");
+                $transaction->remote_status = 'Payment In Progress';
+            } else if ($response["transaction_status"] == 20) { // refund
+                $transaction->status = COMMERCE_PAYMENT_STATUS_SUCCESS;
+                $transaction->message = t("Payment Status: Refunded{$with_warning_msg}");
+                $transaction->remote_status = 'Refunded';
+            } else {
+                $transaction->status = COMMERCE_PAYMENT_STATUS_PENDING;
+                $transaction->message = t("Undefined transaction status {$response["transaction_status"]}");
+            }
+        }        
+    } else {
+        $transaction->status = COMMERCE_PAYMENT_STATUS_PENDING;
+        $transaction->message = t("Signature mismatch");
     }
 
     commerce_order_save($order);
@@ -344,25 +367,7 @@ function commerce_pipwave_callback() {
         return false;
     }
     if (is_array($response)) {
-        $signature_param = array(
-            'timestamp' => $response['timestamp'],
-            'api_key' => variable_get("commerce_pipwave_api_key"),
-            'pw_id' => $response['pw_id'],
-            'txn_id' => $response['txn_id'],
-            'amount' => $response['amount'],
-            'currency_code' => $response['currency_code'],
-            'transaction_status' => $response['transaction_status'],
-            'api_secret' => variable_get('commerce_pipwave_api_secret'),
-        );
-        $signature = commerce_pipwave_generate_signature($signature_param);
-        if ($response['signature'] == $signature) {
-            $payment_method = commerce_payment_method_instance_load('pipwave|commerce_payment_pipwave');
-            $order = commerce_order_load($response['txn_id']);
-            commerce_pipwave_redirect_form_validate($response, $order, $payment_method);
-        } else {
-            echo "Signature mismatch.";
-            exit;
-        }
+        commerce_pipwave_redirect_form_validate($response, $order, $payment_method);
     }
 }
 
