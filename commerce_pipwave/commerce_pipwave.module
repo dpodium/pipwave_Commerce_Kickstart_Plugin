@@ -361,6 +361,7 @@ function commerce_pipwave_redirect_form_validate($response, $order, $payment_met
 }
 
 function commerce_pipwave_callback() {
+    echo "OK";
     if (is_object(json_decode($post_content))) {
         $response = json_decode($post_content, true);
     } else {
