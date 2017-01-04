@@ -193,7 +193,8 @@ function commerce_pipwave_order_form($form, &$form_state, $order, $settings) {
             'id' => $order->uid,
             'email' => $order->mail,
             'surcharge_group' => variable_get('commerce_pipwave_surcharge_group')
-        )
+        ),
+        'tax_exempted_amount' => $amount
     );
     module_load_include('inc', 'addressfield', 'addressfield.administrative_areas');
     module_load_include('inc', 'locale', 'locale');
@@ -263,13 +264,13 @@ function commerce_pipwave_order_form($form, &$form_state, $order, $settings) {
             'api_key' => variable_get('commerce_pipwave_api_key'),
             'token' => $response['token'],
         ]);
-        $sdk_url = (variable_get('commerce_pipwave_test_mode') == '1') ? '//staging-checkout.pipwave.com/sdk/' : '//checkout.pipwave.com/sdk/';
+        $sdk_url = (variable_get('commerce_pipwave_test_mode') == '1') ? '//staging-checkout.pipwave.com/sdk/' : '//secure.pipwave.com/sdk/';
+        $loading_img = (variable_get('commerce_pipwave_test_mode') == '1') ? '//staging-checkout.pipwave.com/images/loading.gif' : '//secure.pipwave.com/images/loading.gif';
         $form['payment_method'] = array(
             '#markup' =>
             '<div id="pwscript" class="text-center"></div>
                     <div id="pwloading" style="text-align: center;">
-                        <i class="fa fa-spinner fa-spin fa-fw margin-bottom" style="font-size: 3em; color: #7a7a7a;"></i>
-                        <span class="sr-only">Loading...</span>
+                        <img src="' . $loading_img . '" />
                     </div>
                     <script type="text/javascript">
                         var pwconfig = ' . $api_data . ';
@@ -296,19 +297,26 @@ function commerce_pipwave_order_form($form, &$form_state, $order, $settings) {
             '#markup' => isset($response['message']) ? (is_array($response['message']) ? implode('; ', $response['message']) : $response['message']) : "Error occured",
         );
     }
-    
+
     return $form;
 }
 
-function commerce_pipwave_redirect_form_validate($response, $order, $payment_method) {
+function commerce_pipwave_redirect_form_validate($order, $payment_method) {
+    commerce_checkout_complete($order);
+}
+
+function commerce_pipwave_update_transaction($order, $payment_method, $response) {
     $transaction = commerce_payment_transaction_new('commerce_pipwave', $response['txn_id']);
     $transaction->instance_id = $payment_method['instance_id'];
     $transaction->currency_code = $response["currency_code"];
     $transaction->amount = commerce_currency_decimal_to_amount($response['amount'], $response["currency_code"]);
     $transaction->remote_id = $response["pw_id"];
     $transaction->status_code = $response["transaction_status"];
-    $with_warning_msg = ($response['status'] == 3001) ? " (with warning)" : '';
-    
+    // AFT Status
+    $aft_status = isset($response['aft_status']) ? $response['aft_status'] : '';
+    $aft_score = isset($response['aft_score']) ? $response['aft_score'] : '';
+    $response_message = isset($response['message']) ? $response['message'] : '';
+
     $signature_param = array(
         'timestamp' => $response['timestamp'],
         'api_key' => variable_get("commerce_pipwave_api_key"),
@@ -319,57 +327,111 @@ function commerce_pipwave_redirect_form_validate($response, $order, $payment_met
         'transaction_status' => $response['transaction_status'],
         'api_secret' => variable_get('commerce_pipwave_api_secret'),
     );
-    $signature = commerce_pipwave_generate_signature($signature_param);
-    if ($response['signature'] == $signature) {
-        if ($response["status"] == 200 || $response["status"] == 3001) {
-            if ($response["transaction_status"] == 10) { // complete
-                $transaction->status = COMMERCE_PAYMENT_STATUS_SUCCESS;
-                $transaction->message = t("Payment Status: Complete{$with_warning_msg}");
-                $transaction->remote_status = 'Paid';
-                commerce_order_status_update($order, 'processing');
-            } else if ($response["transaction_status"] == 1) { // fail
-                $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
-                $transaction->message = t("Payment Status: Failed{$with_warning_msg}");
-                $transaction->remote_status = 'Failed';
-                commerce_order_status_update($order, 'canceled');
-            } else if ($response["transaction_status"] == 2) { // cancel
-                $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
-                $transaction->message = t("Payment Status: Canceled{$with_warning_msg}");
-                $transaction->remote_status = 'Canceled';
-                commerce_order_status_update($order, 'canceled');
-            } else if ($response["transaction_status"] == 5) {
-                commerce_checkout_complete($order);
-                $transaction->status = COMMERCE_PAYMENT_STATUS_PENDING;
-                $transaction->message = t("Payment Status: Pending{$with_warning_msg}");
-                $transaction->remote_status = 'Payment In Progress';
-            } else if ($response["transaction_status"] == 20) { // refund
-                $transaction->status = COMMERCE_PAYMENT_STATUS_SUCCESS;
-                $transaction->message = t("Payment Status: Refunded{$with_warning_msg}");
-                $transaction->remote_status = 'Refunded';
-            } else {
-                $transaction->status = COMMERCE_PAYMENT_STATUS_PENDING;
-                $transaction->message = t("Undefined transaction status {$response["transaction_status"]}");
-            }
-        }        
-    } else {
-        $transaction->status = COMMERCE_PAYMENT_STATUS_PENDING;
-        $transaction->message = t("Signature mismatch");
+    $generatedSignature = commerce_pipwave_generate_signature($signature_param);
+    $message = array();
+    if (isset($response['payment_method_title'])) {
+        $message[] = sprintf("Paid with: %s - pipwave", $response['payment_method_title']);
+    }
+    $message[] = "pipwave Transaction ID: {$response["pw_id"]}";
+    if ($response['signature'] != $generatedSignature) {
+        $transaction_status = -1;
     }
 
-    commerce_order_save($order);
+    $order_status = commerce_pipwave_get_order_status($response['transaction_status'], $response['status']);
+    $message[] = $order_status['message'];
+    $transaction->status = $order_status['txn_status'];
+    $transaction->remote_status = $order_status['remote_status'];
+    if ($transaction_status != -1) {
+        if ($order) {
+            if (in_array($transaction_status, array(10, 20, 25))) {
+                $message[] = sprintf("Currency: %s", $transaction->currency_code);
+                $message[] = sprintf("Final Amount: %s", $transaction->amount);
+            }
+            if ($transaction->amount != $order->commerce_order_total[LANGUAGE_NONE][0]['amount']) {
+                $message[] = "Amount mismatch";
+            }
+            if ($transaction->currency_code != $order->commerce_order_total['und'][0]['currency_code']) {
+                $message[] = "Currency mismatch";
+            }
+            if (!empty($aft_status) && !empty($aft_score)) {
+                $message[] = sprintf("AFT Status: %s", $aft_status);
+                $message[] = sprintf("AFT Score: %s", $aft_score);
+            }
+            if (!empty($response_message)) {
+                $message[] = sprintf("pipwave Message: %s", $response_message);
+            }
+            if (!empty($order_status['order_status'])) {
+                commerce_order_status_update($order, $order_status['order_status']);
+            }
+            commerce_order_save($order);
+        } else {
+            $message[] = "Invalid order";
+        }
+    }
+    $transaction->message = implode("<br>", $message);
     commerce_payment_transaction_save($transaction);
 }
 
+function commerce_pipwave_get_order_status($transaction_status, $api_status) {
+    $with_warning_msg = ($api_status == 3001) ? " (with warning)" : '';
+    $txn_status = COMMERCE_PAYMENT_STATUS_PENDING;
+    $remote_status = '';
+    $order_status = '';
+    switch ($transaction_status) {
+        case 5: // pending
+            $note = t("Payment Status: Pending$with_warning_msg");
+            break;
+        case 1: // failed
+            $note = t("Payment Status: Failed$with_warning_msg");
+            $txn_status = COMMERCE_PAYMENT_STATUS_FAILURE;
+            $remote_status = 'Failed';
+            $order_status = 'canceled';
+            break;
+        case 2: // cancelled
+            $note = t("Payment Status: Cancelled$with_warning_msg");
+            $txn_status = COMMERCE_PAYMENT_STATUS_FAILURE;
+            $remote_status = 'Cancelled';
+            $order_status = 'canceled';
+            break;
+        case 10: // complete
+            $note = t("Payment Status: Completed$with_warning_msg");
+            $txn_status = COMMERCE_PAYMENT_STATUS_SUCCESS;
+            $remote_status = 'Completed';
+            $order_status = 'processing';
+            break;
+        case 20: // refunded
+            $note = t("Payment Status: Refunded$with_warning_msg");
+            $txn_status = COMMERCE_PAYMENT_STATUS_SUCCESS;
+            $remote_status = 'Refunded';
+            $order_status = 'completed';
+            break;
+        case 25: // partial refunded
+            $note = t("Payment Status: Partial Refunded$with_warning_msg");
+            $txn_status = COMMERCE_PAYMENT_STATUS_SUCCESS;
+            $remote_status = 'Partial Refunded';
+            $order_status = 'completed';
+            break;
+        case -1: // signature mismatch
+            $note = t("Signature mismatch");
+            break;
+        default:
+            $note = t("Unknown payment status");
+    }
+
+    return array('message' => $note, 'txn_status' => $txn_status, 'remote_status' => $remote_status, 'order_status' => $order_status);
+}
+
 function commerce_pipwave_callback() {
+    header('HTTP/1.1 200 OK');
     echo "OK";
-    if (is_object(json_decode($post_content))) {
-        $response = json_decode($post_content, true);
-    } else {
-        return false;
+    $post_content = file_get_contents("php://input");
+    $response = json_decode($post_content, true);
+    if (!$response) {
+        exit;
     }
-    if (is_array($response)) {
-        commerce_pipwave_redirect_form_validate($response, $order, $payment_method);
-    }
+    $order = commerce_order_load_by_number($response['txn_id']);
+    $payment_method = commerce_payment_method_instance_load('pipwave|commerce_payment_commerce_pipwave');
+    commerce_pipwave_update_transaction($order, $payment_method, $response);
 }
 
 function commerce_pipwave_send_request($data, $commerce_pipwave_test_mode) {
