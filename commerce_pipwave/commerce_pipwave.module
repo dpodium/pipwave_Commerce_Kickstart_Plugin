@@ -277,7 +277,6 @@ function commerce_pipwave_order_form($form, &$form_state, $order, $settings) {
                         (function (_, p, w, s, d, k) {
                             var a = _.createElement("script");
                             a.setAttribute("src", w + d);
-                            a.setAttribute("data-main", w + s);
                             a.setAttribute("id", k);
                             setTimeout(function() {
                                 var reqPwInit = (typeof reqPipwave != "undefined");
@@ -312,9 +311,9 @@ function commerce_pipwave_update_transaction($order, $payment_method, $response)
     $transaction->amount = commerce_currency_decimal_to_amount($response['amount'], $response["currency_code"]);
     $transaction->remote_id = $response["pw_id"];
     $transaction->status_code = $response["transaction_status"];
-    // AFT Status
-    $aft_status = isset($response['aft_status']) ? $response['aft_status'] : '';
-    $aft_score = isset($response['aft_score']) ? $response['aft_score'] : '';
+    // pipwave risk execution result
+    $pipwave_score = isset($response['pipwave_score']) ? $response['pipwave_score'] : '';
+    $rule_action = isset($response['rules_action']) ? $response['rules_action'] : '';
     $response_message = isset($response['message']) ? $response['message'] : '';
 
     $signature_param = array(
@@ -353,9 +352,9 @@ function commerce_pipwave_update_transaction($order, $payment_method, $response)
             if ($transaction->currency_code != $order->commerce_order_total['und'][0]['currency_code']) {
                 $message[] = "Currency mismatch";
             }
-            if (!empty($aft_status) && !empty($aft_score)) {
-                $message[] = sprintf("AFT Status: %s", $aft_status);
-                $message[] = sprintf("AFT Score: %s", $aft_score);
+            if (!empty($rule_action) && !empty($pipwave_score)) {
+                $message[] = sprintf("Rule Action: %s", $rule_action);
+                $message[] = sprintf("pipwave Score: %s", $pipwave_score);
             }
             if (!empty($response_message)) {
                 $message[] = sprintf("pipwave Message: %s", $response_message);
