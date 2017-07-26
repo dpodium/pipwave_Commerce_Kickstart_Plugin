@@ -232,7 +232,7 @@ function commerce_pipwave_order_form($form, &$form_state, $order, $settings) {
         );
     }
     //get product details
-    foreach ($order->commerce_line_items[LANGUAGE_NONE] as $line) {
+    /*foreach ($order->commerce_line_items[LANGUAGE_NONE] as $line) {
         $line_item = commerce_line_item_load($line['line_item_id']);
         if (isset($line_item->commerce_product[LANGUAGE_NONE][0]['product_id'])) {
             $product = commerce_product_load($line_item->commerce_product[LANGUAGE_NONE][0]['product_id']);
@@ -247,7 +247,7 @@ function commerce_pipwave_order_form($form, &$form_state, $order, $settings) {
                 );
             }
         }
-    }
+    }*/
     $signature_param = array(
         'api_key' => variable_get('commerce_pipwave_api_key'),
         'api_secret' => variable_get('commerce_pipwave_api_secret'),
